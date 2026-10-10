@@ -1,0 +1,59 @@
+{
+  "name": "opencode-skills-sidebar",
+  "version": "0.1.0",
+  "description": "Session-aware skills sidebar and skill picker for the OpenCode v2 TUI",
+  "license": "MIT",
+  "author": "AmineAce",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AmineAce/opencode-skills-sidebar"
+  },
+  "homepage": "https://github.com/AmineAce/opencode-skills-sidebar#readme",
+  "bugs": {
+    "url": "https://github.com/AmineAce/opencode-skills-sidebar/issues"
+  },
+  "exports": {
+    ".": "./index.tsx",
+    "./tui": "./src/tui.tsx",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "index.tsx",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "tui",
+    "skills",
+    "sidebar",
+    "picker"
+  ],
+  "opencode": {
+    "type": "plugin"
+  },
+  "scripts": {
+    "sync": "cp ~/.config/opencode/plugins/skills/tui.tsx src/tui.tsx 2>/dev/null || echo 'no live copy; keeping existing src/tui.tsx'",
+    "deploy": "cp src/tui.tsx ~/.config/opencode/plugins/skills/tui.tsx",
+    "check": "tsc --noEmit",
+    "test": "bun run sync && bun test",
+    "prepublishOnly": "bun run sync && bun run check && bun test"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.26",
+    "@opentui/core": "^0.5.17",
+    "@opentui/solid": "^0.5.17",
+    "solid-js": "^1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.0.26",
+    "@opentui/core": "^0.5.17",
+    "@opentui/solid": "^0.5.17",
+    "@types/bun": "^1.3.0",
+    "solid-js": "^1.9.0",
+    "typescript": "^5.7.0"
+  }
+}
