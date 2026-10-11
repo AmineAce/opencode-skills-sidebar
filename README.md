@@ -98,6 +98,17 @@ subscription is needed there.
 Activating a skill calls `session.skill` with `resume: false`. The skill is
 appended to context only. The model is never resumed.
 
+## Limitations
+
+**Skills cannot be removed or disabled from the plugin.** OpenCode v2
+exposes skill activation only. No API detaches a skill from session context
+once attached. So the picker adds skills but cannot remove them.
+
+This is tracked upstream at
+[anomalyco/opencode#54346](https://github.com/anomalyco/opencode/issues/54346).
+When OpenCode ships a deactivation path, this plugin will support removal.
+Until then the limitation stays documented here instead of hidden.
+
 ## Install
 
 Requires OpenCode v2.
