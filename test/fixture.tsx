@@ -86,20 +86,51 @@ export interface Fixture {
   active: string[]
   /** Emit the native session.skill.activated event to all data.listen handlers. */
   emitActivation: () => void
+  /** Seed the reactive message cache so a tool event can resolve its part. */
+  seedToolMessage: (messageID: string, message: unknown) => void
+  /** Emit a native session.tool.success event to all data.listen handlers. */
+  emitToolSuccess: (data: unknown) => void
+}
+
+export interface UsageFixture {
+  id: string
+  count: number
+  usedAt: number
 }
 
 export async function mountPlugin(
-  options: { skills?: SkillFixture[]; active?: string[]; width?: number; height?: number } = {},
+  options: {
+    skills?: SkillFixture[]
+    active?: string[]
+    usage?: UsageFixture[]
+    width?: number
+    height?: number
+  } = {},
 ): Promise<Fixture> {
   const sessionID = "ses_test"
   const skills = options.skills ?? defaultSkills
   const active = [...(options.active ?? ["ads"])]
+  // Synthesized assistant messages: each use is one completed `skill`
+  // tool call, shaped like the real transcript rows the scan reads.
+  const assistant = (options.usage ?? []).map((use, index) => ({
+    id: `msg_usage_${index}`,
+    time: { created: use.usedAt },
+    content: Array.from({ length: use.count }, (_, call) => ({
+      type: "tool",
+      id: `call_${use.id}_${call}`,
+      name: "skill",
+      state: { status: "completed", input: { id: use.id } },
+      time: { created: use.usedAt },
+    })),
+  }))
+  // Seeded message cache for live tool events to resolve their part.
+  const toolMessages: Record<string, unknown> = {}
 
   const injects: Fixture["injects"] = []
   const toasts: Fixture["toasts"] = []
   const layerFactories: Array<() => FixtureLayer> = []
   const slotClaims: Array<{ append?: string; render: (input: never) => JSX.Element }> = []
-  const listeners: Array<(event: { details: { type: string } }) => void> = []
+  const listeners: Array<(event: { details: { type: string; data?: unknown } }) => void> = []
 
   const [dialogRender, setDialogRender] = createSignal<(() => JSX.Element) | undefined>()
   const [dialogSize, setDialogSize] = createSignal<string | undefined>()
@@ -123,14 +154,25 @@ export async function mountPlugin(
         listeners.push(handler)
         return () => {}
       },
-      session: { get: () => undefined },
+      session: {
+        get: () => undefined,
+        message: {
+          list: () => [],
+          get: (_sessionID: string, messageID: string) => toolMessages[messageID],
+        },
+      },
       location: {
         default: () => "/skills",
         skill: { list: () => skills },
       },
     },
     client: {
-      message: { list: async () => ({ data: active.map((id) => ({ skill: id })) }) },
+      message: {
+        list: async (input?: { type?: string }) =>
+          input?.type === "assistant"
+            ? { data: assistant }
+            : { data: active.map((id) => ({ skill: id })) },
+      },
       session: {
         skill: async (input: { sessionID: string; id: string; resume?: boolean }) => {
           injects.push(input)
@@ -239,6 +281,13 @@ export async function mountPlugin(
     active,
     emitActivation: () => {
       for (const handler of listeners) handler({ details: { type: "session.skill.activated" } })
+    },
+    seedToolMessage: (messageID, message) => {
+      toolMessages[messageID] = message
+    },
+    emitToolSuccess: (data) => {
+      for (const handler of listeners)
+        handler({ details: { type: "session.tool.success", data } })
     },
   }
 }

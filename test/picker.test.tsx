@@ -192,3 +192,77 @@ test("both scrollbars stay hidden even when the content overflows", async () => 
   expect(list.scrollHeight).toBeGreaterThan(list.viewport.height)
   expect(list.verticalScrollBar.visible).toBe(false)
 }, timeout)
+
+// Model usage: the transcript scan feeds the sidebar badges at mount.
+test("sidebar shows compact badges and hollow dots for used skills", async () => {
+  const now = Date.now()
+  const fx = await mountPlugin({
+    active: ["ads"],
+    usage: [
+      { id: "ads", count: 2, usedAt: now - 2 * 3600000 },
+      { id: "ponytail", count: 1, usedAt: now - 3 * 60000 },
+    ],
+  })
+  await fx.app.waitForFrame((frame) => frame.includes("×1 3m"))
+  const frame = fx.app.captureCharFrame()
+  // Attached and used: filled dot plus badge.
+  expect(frame).toContain("×2 2h")
+  // Idle but used: a hollow-dot row appears, sorted by usage.
+  // Ponytail (3m) leads ads (2h): most recent first.
+  expect(frame).toContain("ponytail")
+  expect(frame).toContain("○")
+  expect(frame.indexOf("ponytail")).toBeLessThan(frame.indexOf("ads"))
+  // The Active word is gone: the filled dot carries that meaning now.
+  expect(frame).not.toContain("Active")
+}, timeout)
+
+test("picker shows the full usage words", async () => {
+  const now = Date.now()
+  const fx = await mountPlugin({
+    active: ["ads"],
+    usage: [{ id: "ads", count: 2, usedAt: now - 2 * 3600000 }],
+  })
+  await openPicker(fx)
+  await fx.app.waitForFrame((frame) => frame.includes("used twice"))
+  const frame = fx.app.captureCharFrame()
+  expect(frame).toContain("Active · used twice · 2 hours ago")
+}, timeout)
+
+// Live usage: a skill load lands on the sidebar with no rescan.
+test("a live skill load adds a used-only row with a badge", async () => {
+  const fx = await mountPlugin({ active: ["ads"] })
+  await fx.app.waitForFrame((frame) => frame.includes("More skills"))
+  expect(fx.app.captureCharFrame()).not.toContain("cold-email")
+  fx.seedToolMessage("m1", {
+    content: [
+      {
+        type: "tool",
+        id: "c1",
+        name: "skill",
+        state: { status: "completed", input: { id: "cold-email" } },
+        time: { created: Date.now() },
+      },
+    ],
+  })
+  fx.emitToolSuccess({ sessionID: "ses_test", assistantMessageID: "m1", id: "c1" })
+  await fx.app.waitForFrame((frame) => frame.includes("×1"))
+  const frame = fx.app.captureCharFrame()
+  expect(frame).toContain("cold-email")
+  expect(frame).toContain("○")
+}, timeout)
+
+test("non-skill, unknown, and foreign tool events change nothing", async () => {
+  const fx = await mountPlugin({ active: ["ads"] })
+  await fx.app.waitForFrame((frame) => frame.includes("More skills"))
+  // A resolved non-skill call returns early: no refresh, no badge.
+  fx.seedToolMessage("m2", {
+    content: [{ type: "tool", id: "c9", name: "shell", state: { status: "completed" } }],
+  })
+  fx.emitToolSuccess({ sessionID: "ses_test", assistantMessageID: "m2", id: "c9" })
+  // An unresolvable call falls back to a rescan, which finds no usage.
+  fx.emitToolSuccess({ sessionID: "ses_test", assistantMessageID: "missing", id: "c0" })
+  // Another session's calls never touch this surface.
+  fx.emitToolSuccess({ sessionID: "ses_other", assistantMessageID: "m2", id: "c9" })
+  await fx.app.waitFor(() => fx.injects.length === 0)
+  expect(fx.app.captureCharFrame()).not.toContain("×")
+}, timeout)

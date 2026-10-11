@@ -41,43 +41,194 @@ export function filterSkills<T extends { name: string; description?: string }>(
   )
 }
 
-// Actives first, matching the sidebar order.
-export function activeFirst<T extends { id: string }>(
+// Sorts actives first, then used skills lead within each group, most
+// recent first. Stable: the catalog order survives everywhere else.
+export function sortByUsage<T extends { id: string }>(
   catalog: readonly T[],
   active: ReadonlySet<string>,
+  usage: Readonly<Record<string, SkillUsage>>,
 ): T[] {
-  return [...catalog].sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)))
+  return [...catalog].sort((a, b) => {
+    const group = Number(active.has(b.id)) - Number(active.has(a.id))
+    if (group !== 0) return group
+    const first = usage[a.id]
+    const second = usage[b.id]
+    if (!first && !second) return 0
+    if (!first) return 1
+    if (!second) return -1
+    return second.usedAt - first.usedAt
+  })
 }
 
-// Row status label: active wins, then the manual-only marker.
+// — Model usage tracking —————————————————————————————————————————
+// The model loads skills through the builtin `skill` tool, which stores
+// the skill text as a tool result inside its own message. That path never
+// creates a skill message, so the active set above can never see it. The
+// scan below recovers it: every completed `skill` tool call in recent
+// assistant messages counts as one use of that skill id.
+//
+// Limits: only the scanned window counts (see fetchUsage), failed calls
+// never count, and autoinvoke skills never produce tool calls at all.
+
+export interface SkillUsage {
+  count: number
+  usedAt: number
+}
+
+// Minimal structural view of an assistant message: only the fields the
+// scan reads, so tests and future schema shifts stay decoupled.
+export interface UsageMessagePart {
+  type?: string
+  name?: string
+  id?: string
+  state?: {
+    status?: string
+    input?: { id?: unknown }
+    metadata?: { name?: unknown }
+  }
+  time?: { created?: unknown; ran?: unknown; completed?: unknown }
+}
+export interface UsageMessage {
+  time?: { created?: unknown }
+  content?: UsageMessagePart[]
+}
+
+function toMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime()
+  if (typeof value === "string" && value) {
+    const ms = Date.parse(value)
+    if (!Number.isNaN(ms)) return ms
+  }
+  return undefined
+}
+
+export function scanSkillUsage(
+  messages: readonly UsageMessage[],
+  now: number = Date.now(),
+): Record<string, SkillUsage> {
+  const usage: Record<string, SkillUsage> = {}
+  for (const message of messages) {
+    if (!message || !Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (!part || part.type !== "tool" || part.name !== "skill") continue
+      if (part.state?.status !== "completed") continue
+      const input = part.state?.input
+      const id =
+        typeof input?.id === "string" && input.id
+          ? input.id
+          : typeof part.state?.metadata?.name === "string" && part.state.metadata.name
+            ? part.state.metadata.name
+            : undefined
+      if (!id) continue
+      const at =
+        toMs(part.time?.completed) ??
+        toMs(part.time?.ran) ??
+        toMs(part.time?.created) ??
+        toMs(message.time?.created) ??
+        now
+      const seen = usage[id]
+      usage[id] = seen
+        ? { count: seen.count + 1, usedAt: Math.max(seen.usedAt, at) }
+        : { count: 1, usedAt: at }
+    }
+  }
+  return usage
+}
+
+// The count in plain words: "once" | "twice" | "3 times".
+export function formatUses(count: number): string {
+  if (count <= 1) return "once"
+  if (count === 2) return "twice"
+  return `${count} times`
+}
+
+// Compact age for the narrow sidebar: "now" | "3m" | "2h" | "5d".
+export function ageShort(usedAt: number, now: number = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - usedAt) / 60000))
+  if (minutes < 1) return "now"
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+// Full age for the wide picker: "just now" | "3 minutes ago" | similar.
+export function ageLong(usedAt: number, now: number = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - usedAt) / 60000))
+  if (minutes < 1) return "just now"
+  if (minutes === 1) return "1 minute ago"
+  if (minutes < 60) return `${minutes} minutes ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours === 1) return "1 hour ago"
+  if (hours < 24) return `${hours} hours ago`
+  const days = Math.floor(hours / 24)
+  return days === 1 ? "1 day ago" : `${days} days ago`
+}
+
+// Sidebar badge: "×1 3m". Short because the sidebar is narrow.
+export function usageBadge(use: SkillUsage, now: number = Date.now()): string {
+  return `×${use.count} ${ageShort(use.usedAt, now)}`
+}
+
+// Picker status: "Active · used twice · 3 minutes ago" for attached
+// skills, "used twice · 3 minutes ago" for used-only ones. The hollow
+// picker dot already marks the not-attached state, so the idle word drops
+// out wherever usage text exists.
+export function usageStatusText(
+  use: SkillUsage,
+  isActive: boolean,
+  now: number = Date.now(),
+): string {
+  const text = `used ${formatUses(use.count)} · ${ageLong(use.usedAt, now)}`
+  return isActive ? `Active · ${text}` : text
+}
+
+// Row status label: usage text wins when the model has read the skill,
+// then active, then the manual-only marker.
 export function statusLabel(
   skill: { id: string; autoinvoke?: boolean },
   active: ReadonlySet<string>,
+  usage?: SkillUsage,
+  now: number = Date.now(),
 ): string {
+  if (usage) return usageStatusText(usage, active.has(skill.id), now)
   return active.has(skill.id) ? "Active" : skill.autoinvoke === false ? "idle · manual" : "idle"
 }
 
 // Skills carry no author field, so derive provenance from install location.
-// The sidebar lists only active skills inline (idle ones live in the picker,
-// which renders its own rows), so this row is active-only by design — no
-// status prop, no click handler.
-function SkillRow(props: { skill: SkillInfo }) {
+// The sidebar lists attached skills plus used-only ones (read by the
+// model but never attached), so this row takes both states. Filled dot:
+// attached to the session. Hollow dot: used-only. The hollow dot also
+// works without color.
+function SkillRow(props: { skill: SkillInfo; attached: boolean; usage?: SkillUsage }) {
   const context = usePlugin()
   // Re-read the theme on every access: the plugin context exposes it as a
   // live getter, so a frozen snapshot would go stale on a theme switch.
   const theme = () => context.theme
+  const dot = () => (props.attached ? "●" : "○")
+  const dotColor = () =>
+    props.attached
+      ? theme().text.feedback.success.base
+      : theme().hue.accent[context.themeMode === "light" ? 300 : 200]
 
   return (
     <box flexDirection="row" gap={1} minWidth={0}>
-      <text flexShrink={0} style={{ fg: theme().text.feedback.success.base }}>
-        •
+      <text flexShrink={0} fg={dotColor()}>
+        {dot()}
       </text>
       <text fg={theme().text.base} wrapMode="none" truncate flexGrow={1} flexShrink={1} minWidth={0}>
         <b>{props.skill.name}</b>
       </text>
-      <text fg={theme().text.feedback.success.base} wrapMode="none" flexShrink={0}>
-        Active
-      </text>
+      {/* No Active word: the filled dot already says attached, and its
+          cells now fit the usage badge even on the longest names. */}
+      <Show when={props.usage}>
+        {(use) => (
+          <text fg={theme().text.muted} wrapMode="none" flexShrink={0}>
+            {usageBadge(use(), Date.now())}
+          </text>
+        )}
+      </Show>
     </box>
   )
 }
@@ -147,6 +298,19 @@ export default Plugin.define({
       })
       const items = response.data as Array<{ skill?: string }>
       return new Set(items.map((item) => item.skill).filter((id): id is string => !!id))
+    }
+
+    // Model usage lives in assistant messages, not skill messages: scan
+    // the recent window for completed `skill` tool calls. The window
+    // bounds the payload: full-session content grows without bound.
+    const fetchUsage = async (sessionID: string) => {
+      const response = await context.client.message.list({
+        sessionID,
+        type: "assistant",
+        limit: 100,
+        order: "desc",
+      })
+      return scanSkillUsage(response.data as UsageMessage[])
     }
 
     // resume:false appends the skill to context only. The server resumes
@@ -337,9 +501,11 @@ export default Plugin.define({
         return
       }
       const initial = await fetchActive(sessionID).catch(() => new Set<string>())
-      // Actives first, matching the sidebar order. Preselect the first idle
-      // skill: activating something new is the picker's main job.
-      const ordered = activeFirst(catalog, initial)
+      const initialUsage = await fetchUsage(sessionID).catch((): Record<string, SkillUsage> => ({}))
+      // Actives first, then used skills lead within each group, most
+      // recent first. Preselect the first idle skill: activating something
+      // new is the picker's main job.
+      const ordered = sortByUsage(catalog, initial, initialUsage)
       const firstIdle = Math.max(0, ordered.findIndex((skill) => !initial.has(skill.id)))
 
       const [active, setActive] = createSignal<ReadonlySet<string>>(new Set(initial))
@@ -365,7 +531,9 @@ export default Plugin.define({
       let details: ScrollBoxRenderable | undefined
       let restoreScroll: number | undefined
 
-      const statusOf = (skill: SkillInfo) => statusLabel(skill, active())
+      // Usage is a snapshot at picker open: the model never runs while
+      // the user browses, so no live subscription is needed here.
+      const statusOf = (skill: SkillInfo) => statusLabel(skill, active(), initialUsage[skill.id])
 
       const activate = (skill: SkillInfo | undefined) => {
         if (!skill || active().has(skill.id)) return
@@ -705,6 +873,63 @@ export default Plugin.define({
       return ids
     }
 
+    // Usage tracking per rendered surface. Initial state comes from the
+    // transcript scan; live increments arrive on session.tool.success.
+    // The tool events carry no tool name (verified against the protocol
+    // schema), so each event resolves its finished call through the
+    // reactive message cache and counts only `skill` calls. Anything
+    // unresolvable falls back to a full rescan.
+    const trackUsage = (sessionID: string) => {
+      const [usage, setUsage] = createSignal<Record<string, SkillUsage>>({})
+      const refresh = () => {
+        fetchUsage(sessionID)
+          .then(setUsage)
+          .catch((error) => console.error("Failed to load skill usage", error))
+      }
+      refresh()
+      const stop = context.data.listen(({ details }) => {
+        if (details.type !== "session.tool.success") return
+        const data = details.data as
+          | { sessionID?: unknown; assistantMessageID?: unknown; id?: unknown }
+          | undefined
+        if (!data || data.sessionID !== sessionID) return
+        if (typeof data.assistantMessageID !== "string" || typeof data.id !== "string") {
+          refresh()
+          return
+        }
+        const message = context.data.session.message?.get?.(
+          sessionID,
+          data.assistantMessageID,
+        ) as UsageMessage | undefined
+        const part = message?.content?.find((entry) => entry?.id === data.id)
+        if (!message || !part) {
+          refresh()
+          return
+        }
+        if (part.type !== "tool" || part.name !== "skill") return
+        const input = part.state?.input
+        const id =
+          typeof input?.id === "string" && input.id
+            ? input.id
+            : typeof part.state?.metadata?.name === "string" && part.state.metadata.name
+              ? part.state.metadata.name
+              : undefined
+        if (!id) return
+        const at = Date.now()
+        setUsage((prev) => {
+          const seen = prev[id]
+          return {
+            ...prev,
+            [id]: seen
+              ? { count: seen.count + 1, usedAt: Math.max(seen.usedAt, at) }
+              : { count: 1, usedAt: at },
+          }
+        })
+      })
+      onCleanup(stop)
+      return usage
+    }
+
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -758,13 +983,39 @@ export default Plugin.define({
           () => (context.data.location.skill.list(location()) ?? []) as unknown as SkillInfo[],
         )
         const ids = trackActive(sessionID)
+        const usage = trackUsage(sessionID)
 
         const activeSkills = createMemo(() => catalog().filter((skill) => ids().has(skill.id)))
-        const idleCount = createMemo(() => catalog().filter((skill) => !ids().has(skill.id)).length)
-        // Inline rows are capped; the "More skills" row carries the rest and,
-        // on overflow, the true active total so the count is never hidden.
-        const shownSkills = createMemo(() => activeSkills().slice(0, MAX_ACTIVE_ROWS))
-        const overflowCount = createMemo(() => Math.max(0, activeSkills().length - MAX_ACTIVE_ROWS))
+        // One inline pool: attached plus used-only, sorted by usage. Used
+        // skills lead, most recent first. Unused skills keep catalog order.
+        // The empty group set means no group split: pure usage order. The
+        // list moves every time the model reads a skill.
+        const inlinePool = createMemo(() => {
+          const seen = usage()
+          return sortByUsage(
+            catalog().filter((skill) => ids().has(skill.id) || seen[skill.id]),
+            new Set<string>(),
+            seen,
+          )
+        })
+        // Inline used-only rows are shown, so they leave the idle count.
+        const idleCount = createMemo(
+          () => catalog().filter((skill) => !ids().has(skill.id) && !usage()[skill.id]).length,
+        )
+        // The cap covers the whole pool: fresh reads push stale rows past
+        // it, and the "More skills" row keeps the true totals.
+        // One row model per inline row, read inside a single memo so a
+        // usage update recomputes every badge in one pass.
+        const inlineRows = createMemo(() => {
+          const seen = usage()
+          return inlinePool()
+            .slice(0, MAX_ACTIVE_ROWS)
+            .map((skill) => ({ skill, attached: ids().has(skill.id), usage: seen[skill.id] }))
+        })
+        const overflowCount = createMemo(() => Math.max(0, inlinePool().length - MAX_ACTIVE_ROWS))
+        // The active total joins only when attached rows fold past the cap.
+        const attachedShown = createMemo(() => inlineRows().filter((row) => row.attached).length)
+        const showActiveTotal = createMemo(() => activeSkills().length > attachedShown())
 
         return (
           <Show when={catalog().length > 0}>
@@ -782,8 +1033,8 @@ export default Plugin.define({
                 </text>
               </box>
               <Show when={view.open}>
-                <For each={shownSkills()}>
-                  {(skill) => <SkillRow skill={skill} />}
+                <For each={inlineRows()}>
+                  {(row) => <SkillRow skill={row.skill} attached={row.attached} usage={row.usage} />}
                 </For>
                 {/* Idle count stays as terse as ever; the active total joins
                     it only when rows are hidden past the cap, so the common
@@ -793,7 +1044,7 @@ export default Plugin.define({
                   <Show when={idleCount() > 0 || overflowCount() > 0}>
                     <text fg={theme().text.muted}>
                       ({idleCount()} idle
-                      <Show when={overflowCount() > 0}> · {activeSkills().length} active</Show>)
+                      <Show when={showActiveTotal()}> · {activeSkills().length} active</Show>)
                     </text>
                   </Show>
                 </box>

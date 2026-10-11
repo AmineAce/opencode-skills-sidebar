@@ -5,16 +5,98 @@
 
 Session-aware skills sidebar and skill picker for the OpenCode v2 TUI.
 
-- **Sidebar widget** (`sidebar.content`): lists the session's active skills
-  (capped at 10 inline — overflow folds into the `More skills` row's count)
-  plus a single `More skills (N idle)` row that opens the picker.
-- **Status-bar taskbar chip** (`prompt.footer.status`): shows the live active
-  skill count and opens the picker on click.
-- **Picker dialog**: search (letters and spaces), hover highlight, details view
-  with description and path, and one-key activation.
+The plugin answers two questions at a glance: which skills are attached to
+this session, and which skills the model actually read.
 
-Activation uses `session.skill` with `resume: false`, so a skill is only
-appended to context — the model is never resumed.
+## Why two questions
+
+OpenCode stores those truths in two different places.
+
+- **Attached skills** live in skill messages. You attach a skill through a
+  picker or the skill UI. The skill stays in session context and shapes
+  future turns.
+- **Used skills** live in assistant messages. The model loads a skill through
+  the builtin `skill` tool. The skill text lands as one tool result. It
+  shapes that answer only. No skill message is created.
+
+Most tools show the first truth only. A skill the model read on its own
+never appears. This plugin shows both, and it marks which is which.
+
+## Sidebar widget (`sidebar.content`)
+
+One inline list per session. It holds attached skills plus used-only skills
+(skills the model read but nobody attached).
+
+### Symbol legend
+
+| Row | Meaning |
+| --- | --- |
+| `● ponytail ×1 3m` | Attached to the session, read once by the model, 3 minutes ago |
+| `● accessibility` | Attached, never read by the model |
+| `○ brainstorming ×2 3m` | Never attached, read twice by the model, latest read 3 minutes ago |
+
+- **Filled dot (`●`)**: attached. Color comes from the active theme (success
+  color). No `Active` word: the dot carries that meaning.
+- **Hollow dot (`○`)**: used-only. Color comes from the active theme (accent
+  hue). The shape alone carries the meaning, so it also works without color.
+- **Badge (`×N age`)**: model usage. `×1 3m` means read once, 3 minutes ago.
+  `×2 2h` means read twice, latest read 2 hours ago. `now` means under a
+  minute ago. No badge means the model never read the skill.
+
+### Order
+
+The list sorts by usage, most recent first. Unused skills keep catalog order
+after the used ones. Every model read re-sorts the list at once, so fresh
+reads jump to the top and stale rows sink.
+
+### Cap and counts
+
+- Inline rows cap at 10. Overflow folds into the `More skills` row.
+- `More skills (N idle)` opens the picker. The idle count excludes skills
+  shown inline, including used-only rows.
+- When attached rows fold past the cap, the true total joins the row:
+  `More skills (N idle · M active)`.
+- The `▼ Skills` header collapses the section. Collapsed, it shows
+  `(M active · N idle)` after the title.
+
+### Detection
+
+- **At open**: the plugin scans the last 100 assistant messages for completed
+  `skill` tool calls. That scan is the initial usage state.
+- **Live**: each `session.tool.success` event resolves its finished call and
+  counts it when the call is a `skill` load. Unresolvable events fall back to
+  a rescan.
+- **Limits**: failed skill calls never count. Autoinvoke skills never produce
+  tool calls, so the plugin cannot see their reads. Only the scanned window
+  counts. Ages recompute on each refresh, not every second.
+
+## Status-bar chip (`prompt.footer.status`)
+
+Shows the live attached count (`N skills active`, `no skills active` when
+empty). Used-only skills are not counted: they are not attached. Clicking the
+chip opens the picker.
+
+## Picker dialog
+
+All catalog skills, searchable. Actives lead, then used skills lead within
+each group, most recent first. The first idle skill is preselected.
+
+### Row status strings
+
+| Status | Meaning |
+| --- | --- |
+| `Active` | Attached, never read |
+| `Active · used twice · 3 minutes ago` | Attached and read |
+| `used twice · 3 minutes ago` | Used-only (hollow dot, never attached) |
+| `idle` / `idle · manual` | Neither attached nor read |
+
+Counts speak in words (`once`, `twice`, `3 times`). Ages speak in full words
+(`just now`, `3 minutes ago`, `2 hours ago`, `5 days ago`). Usage is a
+snapshot at picker open: the model never runs while you browse, so no live
+subscription is needed there.
+
+Activating a skill calls `session.skill` with `resume: false`. The skill is
+appended to context only. The model is never resumed.
 
 ## Install
 
@@ -80,10 +162,11 @@ A checkout of this repo can also be loaded directly as a plugin (no publish):
 ```
 
 The render tests mount the real plugin through `testRender` with a mocked
-plugin context (`test/fixture.tsx`) and assert on rendered frames: sidebar rows
-and the overflow cap, search filtering, space-to-activate vs space-to-type,
-details/back navigation, and the active-count refresh on
-`session.skill.activated`.
+plugin context (`test/fixture.tsx`) and assert on rendered frames: sidebar
+rows and the overflow cap, usage badges and usage sort order, search
+filtering, space-to-activate vs space-to-type, details/back navigation, the
+active-count refresh on `session.skill.activated`, and the live usage row on
+`session.tool.success`.
 
 ## Releasing
 
